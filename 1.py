@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import redirect_stderr, redirect_stdout
 
 import pandas as pd
 
@@ -25,11 +26,51 @@ TO_DELETE_FILES = [
     os.path.join(BASE_DIR, "url.txt.stat"),
     os.path.join(BASE_DIR, "res_processed.txt"),
 ]
+LOG_FILE_PATH = None
+
+
+class TeeStream:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+        return len(data)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+
+class LoggerWriter:
+    def __init__(self, logger):
+        self.logger = logger
+        self.buffer = ""
+
+    def write(self, data):
+        if not data:
+            return 0
+        self.buffer += data
+        while "\n" in self.buffer:
+            line, self.buffer = self.buffer.split("\n", 1)
+            line = line.rstrip("\r")
+            if line:
+                self.logger(line)
+        return len(data)
+
+    def flush(self):
+        if self.buffer:
+            line = self.buffer.rstrip("\r")
+            if line:
+                self.logger(line)
+            self.buffer = ""
 
 
 def log(message):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] {message}")
+    line = f"[{timestamp}] {message}"
+    print(line)
 
 
 def hide_python_console():
@@ -307,6 +348,13 @@ def generate_unique_filename(base_dir, base_name, ext):
     return full_path
 
 
+def initialize_logging(output_dir):
+    global LOG_FILE_PATH
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    LOG_FILE_PATH = generate_unique_filename(output_dir, f"run_{timestamp}", ".log")
+    return LOG_FILE_PATH
+
+
 def clean_process_files():
     log("开始清理上次运行的过程文件...")
     for file_path in TO_DELETE_FILES:
@@ -419,109 +467,130 @@ def filter_status_200(excel_file, output_dir, count):
         return None
 
 
+def run_pipeline():
+    hide_python_console()
+    log("开始自动化漏洞扫描和指纹识别流程")
+    log(f"基础目录: {BASE_DIR}")
+
+    date_folder = datetime.datetime.now().strftime("%m%d")
+    full_date_dir = os.path.join(BASE_DIR, date_folder)
+    os.makedirs(full_date_dir, exist_ok=True)
+    log(f"创建日期文件夹: {full_date_dir}")
+
+    clean_process_files()
+
+    log("步骤1: 执行spray扫描...")
+    spray_cmd = f'spray.exe -l {quote_path(URL_FILE)} -d {quote_path(DIR_FILE)} -f {quote_path(JSON_FILE)}'
+    if not run_command(spray_cmd, "spray"):
+        log("错误: spray执行失败")
+        return 1
+    if not wait_for_file(JSON_FILE):
+        log("错误: spray未生成结果文件")
+        return 1
+
+    log("步骤2: 处理spray结果，提取有效URL...")
+    unique_excel_file = generate_unique_filename(BASE_DIR, "res_processed", ".xlsx")
+    unique_txt_file = generate_unique_filename(BASE_DIR, "res_processed", ".txt")
+    if not process_spray_output(JSON_FILE, unique_excel_file, unique_txt_file):
+        log("错误: 处理spray输出失败")
+        return 1
+
+    log("步骤3: 筛选状态码200的URL...")
+    filtered_txt_path = filter_status_200(unique_excel_file, full_date_dir, 1)
+    if not filtered_txt_path:
+        log("错误: 未生成状态码为200的URL文件")
+        return 1
+
+    log("步骤3.5: 移动Spray结果文件到日期文件夹...")
+    spray_json_base = f"spray_original_{datetime.datetime.now().strftime('%Y%m%d')}"
+    spray_json_dest = generate_unique_filename(full_date_dir, spray_json_base, ".json")
+    spray_excel_base = f"spray_processed_{datetime.datetime.now().strftime('%Y%m%d')}"
+    spray_excel_dest = generate_unique_filename(full_date_dir, spray_excel_base, ".xlsx")
+    shutil.move(JSON_FILE, spray_json_dest)
+    log(f"已移动Spray原始结果: {spray_json_dest}")
+    shutil.move(unique_excel_file, spray_excel_dest)
+    log(f"已移动Spray处理后Excel: {spray_excel_dest}")
+
+    log("步骤4: 执行ehole指纹识别...")
+    ehole_urls = validate_ehole_input(filtered_txt_path)
+    if not ehole_urls:
+        return 1
+
+    ehole_executable = resolve_ehole_executable()
+    if not ehole_executable:
+        log("错误: 未找到ehole可执行文件，请确认仓库内存在ehole.exe或系统PATH可访问ehole")
+        return 1
+
+    ehole_base = f"ehole_result_{datetime.datetime.now().strftime('%Y%m%d')}"
+    ehole_output = generate_unique_filename(full_date_dir, ehole_base, ".xlsx")
+    config_out_path = get_config_output_path()
+    log(f"ehole可执行文件: {ehole_executable}")
+    log(f"ehole目标输出路径: {ehole_output}")
+    if config_out_path:
+        log(f"ehole配置输出目录: {config_out_path}")
+
+    ehole_cmd = (
+        f'{quote_path(ehole_executable)} finger '
+        f'-l {quote_path(filtered_txt_path)} '
+        f'-o {quote_path(ehole_output)} -t 10'
+    )
+    if not run_command(ehole_cmd, "ehole"):
+        log(f"错误: ehole执行失败，输入文件: {filtered_txt_path}，URL数量: {len(ehole_urls)}")
+        return 1
+
+    actual_ehole_output = wait_for_ehole_file(ehole_output)
+    if not actual_ehole_output:
+        log(f"错误: ehole未生成结果文件，输入文件: {filtered_txt_path}，URL数量: {len(ehole_urls)}")
+        return 1
+
+    if not actual_ehole_output.lower().endswith((".xlsx", ".xls")):
+        log(f"错误: ehole产出文件不是Excel工作簿: {actual_ehole_output}")
+        return 1
+    if os.path.getsize(actual_ehole_output) <= 0:
+        log(f"错误: ehole产出文件为空: {actual_ehole_output}")
+        return 1
+
+    log("美化ehole结果表格...")
+    process_logger = LoggerWriter(lambda line: log(f"[process_data] {line}"))
+    with redirect_stdout(process_logger), redirect_stderr(process_logger):
+        import process_data as process_data_module
+        result_code = process_data_module.process_data(actual_ehole_output, actual_ehole_output)
+    process_logger.flush()
+    if result_code != 0:
+        log(f"错误: ehole结果后处理失败，文件可能不是可读工作簿: {actual_ehole_output}")
+        return 1
+    log("ehole结果表格美化完成")
+
+    log(f"自动化流程全部完成！所有结果保存在: {full_date_dir}")
+    return 0
+
+
 def main():
-    try:
-        hide_python_console()
-        log("开始自动化漏洞扫描和指纹识别流程")
-        log(f"基础目录: {BASE_DIR}")
-
-        date_folder = datetime.datetime.now().strftime("%m%d")
-        full_date_dir = os.path.join(BASE_DIR, date_folder)
-        os.makedirs(full_date_dir, exist_ok=True)
-        log(f"创建日期文件夹: {full_date_dir}")
-
-        clean_process_files()
-
-        log("步骤1: 执行spray扫描...")
-        spray_cmd = f'spray.exe -l {quote_path(URL_FILE)} -d {quote_path(DIR_FILE)} -f {quote_path(JSON_FILE)}'
-        if not run_command(spray_cmd, "spray"):
-            log("错误: spray执行失败")
-            sys.exit(1)
-        if not wait_for_file(JSON_FILE):
-            log("错误: spray未生成结果文件")
-            sys.exit(1)
-
-        log("步骤2: 处理spray结果，提取有效URL...")
-        unique_excel_file = generate_unique_filename(BASE_DIR, "res_processed", ".xlsx")
-        unique_txt_file = generate_unique_filename(BASE_DIR, "res_processed", ".txt")
-        if not process_spray_output(JSON_FILE, unique_excel_file, unique_txt_file):
-            log("错误: 处理spray输出失败")
-            sys.exit(1)
-
-        log("步骤3: 筛选状态码200的URL...")
-        filtered_txt_path = filter_status_200(unique_excel_file, full_date_dir, 1)
-        if not filtered_txt_path:
-            log("错误: 未生成状态码为200的URL文件")
-            sys.exit(1)
-
-        log("步骤3.5: 移动Spray结果文件到日期文件夹...")
-        spray_json_base = f"spray_original_{datetime.datetime.now().strftime('%Y%m%d')}"
-        spray_json_dest = generate_unique_filename(full_date_dir, spray_json_base, ".json")
-        spray_excel_base = f"spray_processed_{datetime.datetime.now().strftime('%Y%m%d')}"
-        spray_excel_dest = generate_unique_filename(full_date_dir, spray_excel_base, ".xlsx")
-        shutil.move(JSON_FILE, spray_json_dest)
-        log(f"已移动Spray原始结果: {spray_json_dest}")
-        shutil.move(unique_excel_file, spray_excel_dest)
-        log(f"已移动Spray处理后Excel: {spray_excel_dest}")
-
-        log("步骤4: 执行ehole指纹识别...")
-        ehole_urls = validate_ehole_input(filtered_txt_path)
-        if not ehole_urls:
-            sys.exit(1)
-
-        ehole_executable = resolve_ehole_executable()
-        if not ehole_executable:
-            log("错误: 未找到ehole可执行文件，请确认仓库内存在ehole.exe或系统PATH可访问ehole")
-            sys.exit(1)
-
-        ehole_base = f"ehole_result_{datetime.datetime.now().strftime('%Y%m%d')}"
-        ehole_output = generate_unique_filename(full_date_dir, ehole_base, ".xlsx")
-        config_out_path = get_config_output_path()
-        log(f"ehole可执行文件: {ehole_executable}")
-        log(f"ehole目标输出路径: {ehole_output}")
-        if config_out_path:
-            log(f"ehole配置输出目录: {config_out_path}")
-
-        ehole_cmd = (
-            f'{quote_path(ehole_executable)} finger '
-            f'-l {quote_path(filtered_txt_path)} '
-            f'-o {quote_path(ehole_output)} -t 10'
-        )
-        if not run_command(ehole_cmd, "ehole"):
-            log(f"错误: ehole执行失败，输入文件: {filtered_txt_path}，URL数量: {len(ehole_urls)}")
-            sys.exit(1)
-
-        actual_ehole_output = wait_for_ehole_file(ehole_output)
-        if not actual_ehole_output:
-            log(f"错误: ehole未生成结果文件，输入文件: {filtered_txt_path}，URL数量: {len(ehole_urls)}")
-            sys.exit(1)
-
-        if not actual_ehole_output.lower().endswith((".xlsx", ".xls")):
-            log(f"错误: ehole产出文件不是Excel工作簿: {actual_ehole_output}")
-            sys.exit(1)
-        if os.path.getsize(actual_ehole_output) <= 0:
-            log(f"错误: ehole产出文件为空: {actual_ehole_output}")
-            sys.exit(1)
-
-        log("美化ehole结果表格...")
-        result = subprocess.run(["python", "process_data.py", actual_ehole_output, actual_ehole_output])
-        if result.returncode != 0:
-            log(f"错误: ehole结果后处理失败，文件可能不是可读工作簿: {actual_ehole_output}")
-            sys.exit(1)
-        log("ehole结果表格美化完成")
-
-        log(f"自动化流程全部完成！所有结果保存在: {full_date_dir}")
-    except Exception as e:
-        log(f"程序异常: {str(e)}")
-        sys.exit(1)
-
-
-if __name__ == "__main__":
     os.system("chcp 65001 >nul 2>&1")
     try:
         import pandas as pd  # noqa: F401
     except ImportError:
-        log("错误: 缺少pandas库，请执行 'pip install pandas'")
-        sys.exit(1)
+        print("错误: 缺少pandas库，请执行 'pip install pandas'")
+        return 1
 
-    main()
+    date_folder = datetime.datetime.now().strftime("%m%d")
+    full_date_dir = os.path.join(BASE_DIR, date_folder)
+    os.makedirs(full_date_dir, exist_ok=True)
+    log_file_path = initialize_logging(full_date_dir)
+
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    with open(log_file_path, "a", encoding="utf-8", buffering=1) as log_file:
+        tee_stdout = TeeStream(original_stdout, log_file)
+        tee_stderr = TeeStream(original_stderr, log_file)
+        with redirect_stdout(tee_stdout), redirect_stderr(tee_stderr):
+            log(f"日志文件: {log_file_path}")
+            try:
+                return run_pipeline()
+            except Exception as e:
+                log(f"程序异常: {str(e)}")
+                return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
