@@ -1,43 +1,48 @@
-import os
-import time
 import datetime
-import sys
-import subprocess
+import glob
+import os
 import shutil
+import subprocess
+import sys
+import time
+
 import pandas as pd
 
-# 配置信息
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 URL_FILE = os.path.join(BASE_DIR, "url.txt")
 DIR_FILE = os.path.join(BASE_DIR, "dirv2.txt")
-JSON_FILE = os.path.join(BASE_DIR, "res.json")        # spray原始输出
-EXCEL_FILE = os.path.join(BASE_DIR, "res_processed.xlsx")  # 处理后的Excel
-TXT_FILE = os.path.join(BASE_DIR, "res_processed.txt")    # 提取的URL列表
-# Default to showing the console so double-click or terminal runs do not
-# look like an immediate crash when the script hides its own window.
+JSON_FILE = os.path.join(BASE_DIR, "res.json")
+EXCEL_FILE = os.path.join(BASE_DIR, "res_processed.xlsx")
+TXT_FILE = os.path.join(BASE_DIR, "res_processed.txt")
 HIDE_PYTHON_CONSOLE = False
 COMMAND_TIMEOUT = 1800
-STATUS_CODE_COL_INDEX = 9  # J列（Excel列索引从0开始，J列对应索引9）【Spray状态码结果在此列】
-URL_COL_INDEX = 4  # E列（根据实际Excel列调整）
-
-# 需要删除的过程文件列表
+EHOLE_WAIT_TIMEOUT = 180
+STATUS_CODE_COL_INDEX = 9
+URL_COL_INDEX = 4
+URL_COLUMN_CANDIDATES = ["url", "direct url", "directurl", "网址", "链接"]
+STATUS_COLUMN_CANDIDATES = ["status", "status code", "status_code", "code", "状态码", "响应码", "http code"]
 TO_DELETE_FILES = [
     os.path.join(BASE_DIR, "url.txt.stat"),
-    os.path.join(BASE_DIR, "res_processed.txt")
+    os.path.join(BASE_DIR, "res_processed.txt"),
 ]
+
 
 def log(message):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}")
 
+
 def hide_python_console():
     if HIDE_PYTHON_CONSOLE:
         try:
-            import win32gui, win32con
+            import win32con
+            import win32gui
+
             hwnd = win32gui.GetForegroundWindow()
             win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
-        except:
+        except Exception:
             log("警告: 无法隐藏 Python 控制台窗口")
+
 
 def run_command(command, stage_name, timeout=COMMAND_TIMEOUT):
     log(f"执行{stage_name}命令: {command}")
@@ -59,11 +64,12 @@ def run_command(command, stage_name, timeout=COMMAND_TIMEOUT):
     log(f"{stage_name} 执行完成")
     return True
 
+
 def wait_for_file(file_path, timeout=300):
     log(f"等待文件生成: {file_path}")
     start_time = time.time()
     while time.time() - start_time < timeout:
-        if os.path.exists(file_path):
+        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
             log(f"文件已生成: {file_path}")
             return True
         time.sleep(1)
@@ -79,32 +85,198 @@ def get_config_output_path():
                 if line.startswith("CfgOutPath:"):
                     path = line.split(":", 1)[1].strip().strip('"')
                     if path:
-                        return path
+                        normalized = os.path.normpath(path)
+                        log(f"读取到CfgOutPath: {normalized}")
+                        return normalized
     except Exception as e:
         log(f"警告: 读取 config.yaml 输出目录失败: {e}")
     return None
 
 
-def wait_for_ehole_file(expected_path, timeout=300):
+def unique_paths(paths):
+    seen = set()
+    unique = []
+    for path in paths:
+        if not path:
+            continue
+        normalized = os.path.normcase(os.path.normpath(path))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(path)
+    return unique
+
+
+def quote_path(path):
+    return f'"{path}"'
+
+
+def resolve_ehole_executable():
+    local_candidates = [
+        os.path.join(BASE_DIR, "ehole.exe"),
+        os.path.join(BASE_DIR, "ehole"),
+    ]
+    for candidate in local_candidates:
+        if os.path.isfile(candidate):
+            return candidate
+
+    for candidate in ("ehole.exe", "ehole"):
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+
+    return None
+
+
+def read_valid_urls(file_path):
+    urls = []
+    seen = set()
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            url = line.strip()
+            if not url.startswith(("http://", "https://")):
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
+def validate_ehole_input(file_path):
+    if not os.path.exists(file_path):
+        log(f"错误: ehole输入文件不存在: {file_path}")
+        return []
+
+    urls = read_valid_urls(file_path)
+    if not urls:
+        log(f"错误: ehole输入为空或无有效URL: {file_path}")
+        return []
+
+    log(f"ehole输入URL数量: {len(urls)}")
+    return urls
+
+
+def find_semantic_column(columns, candidates):
+    normalized = {str(column).strip().lower(): column for column in columns}
+    for candidate in candidates:
+        match = normalized.get(candidate.lower())
+        if match is not None:
+            return match
+    return None
+
+
+def detect_spray_columns(df):
+    url_col = df.columns[URL_COL_INDEX] if len(df.columns) > URL_COL_INDEX else None
+    status_col = df.columns[STATUS_CODE_COL_INDEX] if len(df.columns) > STATUS_CODE_COL_INDEX else None
+    semantic_url_col = find_semantic_column(df.columns, URL_COLUMN_CANDIDATES)
+    semantic_status_col = find_semantic_column(df.columns, STATUS_COLUMN_CANDIDATES)
+
+    return {
+        "url_col": url_col,
+        "status_col": status_col,
+        "semantic_url_col": semantic_url_col,
+        "semantic_status_col": semantic_status_col,
+    }
+
+
+def normalize_status_column(series):
+    return pd.to_numeric(series, errors="coerce")
+
+
+def normalize_url_values(values):
+    urls = []
+    seen = set()
+    for value in values:
+        if pd.isna(value):
+            continue
+        url = str(value).strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def extract_status_200_urls(df, status_col, url_col):
+    if status_col is None or url_col is None:
+        return []
+
+    status_series = normalize_status_column(df[status_col])
+    filtered = df[status_series == 200]
+    return normalize_url_values(filtered[url_col].tolist())
+
+
+def file_size_stable(file_path, settle_seconds=1):
+    try:
+        if not os.path.isfile(file_path):
+            return False
+        size_before = os.path.getsize(file_path)
+        if size_before <= 0:
+            return False
+        time.sleep(settle_seconds)
+        if not os.path.isfile(file_path):
+            return False
+        size_after = os.path.getsize(file_path)
+        return size_after > 0 and size_before == size_after
+    except OSError:
+        return False
+
+
+def discover_ehole_output(expected_path):
     config_out_path = get_config_output_path()
-    candidate_paths = [expected_path]
+    expected_dir = os.path.dirname(expected_path)
+    expected_name = os.path.basename(expected_path)
+    expected_stem, expected_ext = os.path.splitext(expected_name)
 
-    if config_out_path:
-        config_candidate = os.path.join(config_out_path, os.path.basename(expected_path))
-        if config_candidate not in candidate_paths:
-            candidate_paths.append(config_candidate)
+    exact_candidates = unique_paths([
+        expected_path,
+        os.path.join(config_out_path, expected_name) if config_out_path else None,
+    ])
+    search_dirs = unique_paths([expected_dir, config_out_path, BASE_DIR])
+    patterns = [expected_name, f"{expected_stem}*.xlsx"]
 
-    log(f"等待ehole结果文件生成: {' | '.join(candidate_paths)}")
+    for candidate in exact_candidates:
+        if file_size_stable(candidate):
+            return candidate, exact_candidates, search_dirs
+
+    discovered = []
+    for search_dir in search_dirs:
+        if not search_dir or not os.path.isdir(search_dir):
+            continue
+        for pattern in patterns:
+            discovered.extend(glob.glob(os.path.join(search_dir, pattern)))
+
+    discovered = unique_paths(discovered)
+    discovered = [path for path in discovered if os.path.isfile(path)]
+    discovered.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+
+    for candidate in discovered:
+        if file_size_stable(candidate):
+            if expected_ext.lower() == ".xlsx" and not candidate.lower().endswith(".xlsx"):
+                continue
+            return candidate, exact_candidates, search_dirs
+
+    return None, exact_candidates, search_dirs
+
+
+def wait_for_ehole_file(expected_path, timeout=EHOLE_WAIT_TIMEOUT):
     start_time = time.time()
+    last_logged_candidates = None
 
     while time.time() - start_time < timeout:
-        for candidate_path in candidate_paths:
-            if not os.path.exists(candidate_path):
-                continue
-            if os.path.getsize(candidate_path) <= 0:
-                continue
+        candidate_path, exact_candidates, search_dirs = discover_ehole_output(expected_path)
+        log_candidates = exact_candidates + search_dirs
+        if log_candidates != last_logged_candidates:
+            log(f"等待ehole结果文件生成: {' | '.join(log_candidates)}")
+            last_logged_candidates = log_candidates
 
-            if candidate_path != expected_path:
+        if candidate_path:
+            normalized_expected = os.path.normcase(os.path.normpath(expected_path))
+            normalized_candidate = os.path.normcase(os.path.normpath(candidate_path))
+            if normalized_candidate != normalized_expected:
                 try:
                     shutil.move(candidate_path, expected_path)
                     log(f"已将ehole结果移动到目标目录: {expected_path}")
@@ -116,26 +288,25 @@ def wait_for_ehole_file(expected_path, timeout=300):
             log(f"ehole结果文件已生成: {candidate_path}")
             return candidate_path
 
-        time.sleep(1)
+        time.sleep(2)
 
-    log(f"错误: 未找到ehole结果文件: {' | '.join(candidate_paths)}")
+    log("错误: 在候选目录中未找到ehole结果文件")
     return None
 
-# 生成不冲突的文件名
+
 def generate_unique_filename(base_dir, base_name, ext):
     counter = 1
     original_name = f"{base_name}{ext}"
     full_path = os.path.join(base_dir, original_name)
-    
-    # 如果文件已存在，则添加序号后缀
+
     while os.path.exists(full_path):
         new_name = f"{base_name}_{counter}{ext}"
         full_path = os.path.join(base_dir, new_name)
         counter += 1
-    
+
     return full_path
 
-# 删除指定的过程文件
+
 def clean_process_files():
     log("开始清理上次运行的过程文件...")
     for file_path in TO_DELETE_FILES:
@@ -149,6 +320,7 @@ def clean_process_files():
             log(f"文件不存在，跳过删除: {file_path}")
     log("过程文件清理完成")
 
+
 def process_spray_output(json_file, excel_file, txt_file):
     log(f"开始处理spray结果: {json_file}")
     log("process_data.py 处理大文件时可能持续较久，期间会显示实时输出。")
@@ -157,15 +329,13 @@ def process_spray_output(json_file, excel_file, txt_file):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=1
+        bufsize=1,
     )
-    last_log_time = time.time()
     if process.stdout is not None:
         for line in process.stdout:
             line = line.rstrip()
             if line:
                 log(f"[process_data] {line}")
-            last_log_time = time.time()
     return_code = process.wait()
     if return_code != 0:
         log(f"错误: 数据处理失败，退出码: {return_code}")
@@ -174,12 +344,17 @@ def process_spray_output(json_file, excel_file, txt_file):
         log(f"错误: 处理后的Excel文件未生成: {excel_file}")
         return False
     if not os.path.exists(txt_file):
-        log(f"警告: 未找到URL列表文件: {txt_file}，可能没有有效URL")
+        log(f"错误: 未找到URL列表文件: {txt_file}")
         return False
-    with open(txt_file, 'r', encoding='utf-8') as f:
-        url_count = len(f.readlines())
-    log(f"成功提取 {url_count} 个URL")
+
+    urls = read_valid_urls(txt_file)
+    if not urls:
+        log(f"错误: 处理后的URL列表为空或无有效URL: {txt_file}")
+        return False
+
+    log(f"成功提取 {len(urls)} 个URL")
     return True
+
 
 def filter_status_200(excel_file, output_dir, count):
     try:
@@ -187,167 +362,166 @@ def filter_status_200(excel_file, output_dir, count):
         if not os.path.exists(excel_file):
             log(f"错误: Excel文件不存在: {excel_file}")
             return None
-        
+
         df = pd.read_excel(excel_file)
         if df.empty:
             log("错误: Excel文件为空")
             return None
-        
-        # 标记状态码列位置（J列）
-        log(f"注意: Spray扫描的状态码结果配置为J列，对应Python索引 {STATUS_CODE_COL_INDEX}")
-        
-        try:
-            status_code_col = df.columns[STATUS_CODE_COL_INDEX]
-            url_col = df.columns[URL_COL_INDEX]
-        except IndexError:
-            log(f"错误: Excel文件列数不足，无法获取索引为 {STATUS_CODE_COL_INDEX} (J列) 或 {URL_COL_INDEX} 的列")
-            log(f"Excel实际列数: {len(df.columns)}，列名: {list(df.columns)}")
+
+        columns_info = detect_spray_columns(df)
+        url_col = columns_info["url_col"]
+        status_col = columns_info["status_col"]
+        semantic_url_col = columns_info["semantic_url_col"]
+        semantic_status_col = columns_info["semantic_status_col"]
+
+        if status_col is None or url_col is None:
+            log(f"错误: 无法识别状态码列或URL列，列名: {list(df.columns)}")
             return None
-        
-        log(f"使用列 '{url_col}' (E列) 作为URL列，列 '{status_code_col}' (J列) 作为状态码列")
-        
-        if df[status_code_col].dtype not in [int, float]:
-            log(f"警告: 状态码列数据类型不是数值类型: {df[status_code_col].dtype}")
-            log(f"尝试转换数据类型...")
-            try:
-                df[status_code_col] = pd.to_numeric(df[status_code_col], errors='coerce')
-            except:
-                log(f"错误: 无法将状态码列转换为数值类型")
-                return None
-        
-        df_200 = df[df[status_code_col] == 200].copy()
-        total_rows = len(df)
-        filtered_rows = len(df_200)
-        log(f"Excel总行数: {total_rows}，状态码为200的行数: {filtered_rows}")
-        
+
+        log(f"优先使用列 '{url_col}' 作为URL列，列 '{status_col}' 作为状态码列")
+        urls_200 = extract_status_200_urls(df, status_col, url_col)
+
+        if not urls_200 and (semantic_url_col != url_col or semantic_status_col != status_col):
+            log("固定列未提取到有效URL，尝试按列名语义重新识别...")
+            urls_200 = extract_status_200_urls(df, semantic_status_col, semantic_url_col)
+            if urls_200:
+                url_col = semantic_url_col
+                status_col = semantic_status_col
+                log(f"回退后使用列 '{url_col}' 作为URL列，列 '{status_col}' 作为状态码列")
+
+        filtered_rows = len(urls_200)
+        log(f"提取并去重后得到 {filtered_rows} 个状态码为200的URL")
+
         if filtered_rows == 0:
-            log("警告: 未找到状态码为200的URL")
+            log("警告: 未找到状态码为200的有效URL")
             return None
-        
-        urls_200 = df_200[df.columns[URL_COL_INDEX]].dropna().unique().tolist()
-        log(f"提取并去重后得到 {len(urls_200)} 个状态码为200的URL")
-        
+
         date_str = datetime.datetime.now().strftime("%Y%m%d")
         base_filename = f"{date_str}_status200_urls_{count}"
-        
-        # 使用新函数生成唯一文件名
         output_file = generate_unique_filename(output_dir, base_filename, ".txt")
-        
+
         log(f"将状态码为200的URL写入文件: {output_file}")
-        with open(output_file, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(urls_200))
-        
-        with open(output_file, 'r', encoding='utf-8') as f:
-            written_urls = f.read().splitlines()
-        
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write("\n".join(urls_200))
+
+        written_urls = read_valid_urls(output_file)
         if len(written_urls) != len(urls_200):
-            log(f"警告: 写入的URL数量({len(written_urls)})与筛选的URL数量({len(urls_200)})不一致")
-        
+            log(f"警告: 写入的有效URL数量({len(written_urls)})与筛选的URL数量({len(urls_200)})不一致")
+
+        if not written_urls:
+            log("错误: 最终输出的ehole输入URL为空")
+            return None
+
         log(f"状态码为200的URL已保存至: {output_file}")
         return output_file
     except Exception as e:
         log(f"筛选错误: {e}")
         return None
 
+
 def main():
     try:
         hide_python_console()
-        log(f"开始自动化漏洞扫描和指纹识别流程")
+        log("开始自动化漏洞扫描和指纹识别流程")
         log(f"基础目录: {BASE_DIR}")
-        
-        # 创建日期文件夹
+
         date_folder = datetime.datetime.now().strftime("%m%d")
         full_date_dir = os.path.join(BASE_DIR, date_folder)
         os.makedirs(full_date_dir, exist_ok=True)
         log(f"创建日期文件夹: {full_date_dir}")
-        
-        # 清理指定的过程文件
+
         clean_process_files()
-        
-        # 步骤1: 执行spray扫描
+
         log("步骤1: 执行spray扫描...")
-        spray_cmd = f'spray.exe -l "{URL_FILE}" -d "{DIR_FILE}" -f "{JSON_FILE}"'
-        spray_ok = run_command(spray_cmd, "spray")
-        if not spray_ok:
+        spray_cmd = f'spray.exe -l {quote_path(URL_FILE)} -d {quote_path(DIR_FILE)} -f {quote_path(JSON_FILE)}'
+        if not run_command(spray_cmd, "spray"):
             log("错误: spray执行失败")
             sys.exit(1)
         if not wait_for_file(JSON_FILE):
             log("错误: spray未生成结果文件")
             sys.exit(1)
-        
-        # 步骤2: 处理spray结果，提取有效URL
+
         log("步骤2: 处理spray结果，提取有效URL...")
-        
-        # 为输出文件生成唯一文件名
         unique_excel_file = generate_unique_filename(BASE_DIR, "res_processed", ".xlsx")
         unique_txt_file = generate_unique_filename(BASE_DIR, "res_processed", ".txt")
-        
         if not process_spray_output(JSON_FILE, unique_excel_file, unique_txt_file):
             log("错误: 处理spray输出失败")
             sys.exit(1)
-        
-        # 步骤3: 筛选状态码200的URL
+
         log("步骤3: 筛选状态码200的URL...")
         filtered_txt_path = filter_status_200(unique_excel_file, full_date_dir, 1)
         if not filtered_txt_path:
             log("错误: 未生成状态码为200的URL文件")
             sys.exit(1)
-        
-        # 步骤3.5: 移动Spray结果文件到日期文件夹
+
         log("步骤3.5: 移动Spray结果文件到日期文件夹...")
-        
-        # 为移动的文件生成唯一文件名
         spray_json_base = f"spray_original_{datetime.datetime.now().strftime('%Y%m%d')}"
         spray_json_dest = generate_unique_filename(full_date_dir, spray_json_base, ".json")
-        
         spray_excel_base = f"spray_processed_{datetime.datetime.now().strftime('%Y%m%d')}"
         spray_excel_dest = generate_unique_filename(full_date_dir, spray_excel_base, ".xlsx")
-        
         shutil.move(JSON_FILE, spray_json_dest)
         log(f"已移动Spray原始结果: {spray_json_dest}")
-        
         shutil.move(unique_excel_file, spray_excel_dest)
         log(f"已移动Spray处理后Excel: {spray_excel_dest}")
-        
-        # 步骤4: 执行ehole指纹识别
+
         log("步骤4: 执行ehole指纹识别...")
-        
-        # 为ehole结果生成唯一文件名
+        ehole_urls = validate_ehole_input(filtered_txt_path)
+        if not ehole_urls:
+            sys.exit(1)
+
+        ehole_executable = resolve_ehole_executable()
+        if not ehole_executable:
+            log("错误: 未找到ehole可执行文件，请确认仓库内存在ehole.exe或系统PATH可访问ehole")
+            sys.exit(1)
+
         ehole_base = f"ehole_result_{datetime.datetime.now().strftime('%Y%m%d')}"
         ehole_output = generate_unique_filename(full_date_dir, ehole_base, ".xlsx")
-        
-        ehole_cmd = f'ehole finger -l "{filtered_txt_path}" -o "{ehole_output}" -t 10'
-        ehole_ok = run_command(ehole_cmd, "ehole")
-        if not ehole_ok:
-            log("错误: ehole执行失败")
+        config_out_path = get_config_output_path()
+        log(f"ehole可执行文件: {ehole_executable}")
+        log(f"ehole目标输出路径: {ehole_output}")
+        if config_out_path:
+            log(f"ehole配置输出目录: {config_out_path}")
+
+        ehole_cmd = (
+            f'{quote_path(ehole_executable)} finger '
+            f'-l {quote_path(filtered_txt_path)} '
+            f'-o {quote_path(ehole_output)} -t 10'
+        )
+        if not run_command(ehole_cmd, "ehole"):
+            log(f"错误: ehole执行失败，输入文件: {filtered_txt_path}，URL数量: {len(ehole_urls)}")
             sys.exit(1)
 
-        # 检查ehole结果文件是否生成
-        actual_ehole_output = wait_for_ehole_file(ehole_output, timeout=30)
+        actual_ehole_output = wait_for_ehole_file(ehole_output)
         if not actual_ehole_output:
-            log("错误: ehole未生成结果文件")
+            log(f"错误: ehole未生成结果文件，输入文件: {filtered_txt_path}，URL数量: {len(ehole_urls)}")
             sys.exit(1)
 
-        # 美化ehole结果表格
+        if not actual_ehole_output.lower().endswith((".xlsx", ".xls")):
+            log(f"错误: ehole产出文件不是Excel工作簿: {actual_ehole_output}")
+            sys.exit(1)
+        if os.path.getsize(actual_ehole_output) <= 0:
+            log(f"错误: ehole产出文件为空: {actual_ehole_output}")
+            sys.exit(1)
+
         log("美化ehole结果表格...")
-        subprocess.run(["python", "process_data.py", actual_ehole_output, actual_ehole_output])
+        result = subprocess.run(["python", "process_data.py", actual_ehole_output, actual_ehole_output])
+        if result.returncode != 0:
+            log(f"错误: ehole结果后处理失败，文件可能不是可读工作簿: {actual_ehole_output}")
+            sys.exit(1)
         log("ehole结果表格美化完成")
-        
+
         log(f"自动化流程全部完成！所有结果保存在: {full_date_dir}")
-    
     except Exception as e:
         log(f"程序异常: {str(e)}")
         sys.exit(1)
 
+
 if __name__ == "__main__":
-    os.system("chcp 65001 >nul 2>&1")  # 确保中文显示正常
-    
-    # 检查依赖
+    os.system("chcp 65001 >nul 2>&1")
     try:
-        import psutil
-        import pandas as pd
+        import pandas as pd  # noqa: F401
     except ImportError:
-        log("错误: 缺少psutil或pandas库，请执行 'pip install psutil pandas'")
+        log("错误: 缺少pandas库，请执行 'pip install pandas'")
         sys.exit(1)
-    
+
     main()
