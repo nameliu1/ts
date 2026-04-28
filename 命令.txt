@@ -1,0 +1,5 @@
+ts -hf ip.txt -portf ports.txt -np -m port,url,js
+ts -hf ip.txt -portf ports.txt -np -m port,url
+
+ts -hf ip.txt -np -m port,url,js
+ts -hf ip.txt -np -m port,url

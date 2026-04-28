@@ -1,0 +1,173 @@
+CurrentVersion: 2.8.0
+NewVersion: 2.9.5
+AgreePolicy: false
+CheckUpdate: 2026.04.28
+CheckUpdateSN: 00DA1A016E00000000000000E0001A2000000000000000000000000000000000
+LicenseKey: ""
+InterFace: ""
+CfgUiMode: light
+CfgLanguage: zh
+CfgPath: C:\Users\Administrator\Desktop\ehole_magic\1
+CfgOutPath: C:\Users\Administrator\Desktop\ehole_magic\1
+Cfgtimeout: "3000"
+CfgWebTimeout: "15000"
+CfgCookie: ""
+SelectedCfgUA: Cfgrandua
+Cfguatxt: Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko)
+  Chrome/80.0.3987.87 Safari/537.36 SE 2.X MetaSr 1.0
+CfgGlobalProxy: false
+CfgProxy: ""
+CfgProxyAddrs: http://127.0.0.1:51024
+CfgOpenFile: false
+Enginekeys:
+  fofa: ""
+  hunter: ""
+  quake: ""
+  zoomeyeapi: ""
+  zerozone: ""
+  shodan: ""
+  threatbook: ""
+  virustotal: ""
+  github: ""
+  censys: ""
+  binaryedge: ""
+  chaos: ""
+  passivetotal: ""
+  bevigil: ""
+  certspotter: ""
+  securitytrails: ""
+  intelx: ""
+  EnginePages: "5"
+Engines:
+  fofa: false
+  hunter: false
+  quake: false
+  zoomeyeapi: false
+  zerozone: false
+  shodan: false
+  threatbook: false
+  virustotal: false
+  github: false
+  censys: false
+  binaryedge: false
+  chaos: false
+  passivetotal: false
+  bevigil: false
+  certspotter: false
+  securitytrails: false
+PingScan: true
+IpThreadStr: "100"
+IpSelectedStrategy: top100
+IpStrategyPorts: 21,22,23,53,80,81,82,83,85,88,135,139,443,445,888,1433,1521,3306,3389,3443,4430,4433,4443,4899,5432,5443,5900,5985,6379,7001,8000,8001,8002,8003,8008,8009,8010,8080,8081,8082,8086,8088,8089,8090,8443,8888,9000,9043,9100,9200,9443,9999,10443,11211,27017
+IpFinger: true
+IpPwdCheck: false
+IpPocCheck: false
+IpFingerOpt: ""
+IpTimeoutStr: "1000"
+FilterPrint: false
+SmartMode: true
+SmartPortProbe: icmp,80
+SmartIpProbe: 1,254
+UrlThreadStr: "100"
+UrlPocCheck: false
+ActiveFinger: false
+UrlFingerOpt: tiny
+Screenshot: false
+SubThreadStr: "50"
+SubPortStr: 80,443
+SubFilterIp: ""
+SubApi: true
+SubWildCard: true
+SubPocCheck: false
+SubFinger: true
+SubSelectDns: 阿里DNS-223.5.5.5
+SubCustomDictStr: ""
+PocThreadStr: "100"
+PocTimeDelay: "0"
+PocRetryStr: "1"
+PocFinger: true
+PocFingerForPoc: true
+PocNoMacthWithNoPoc: false
+PocLevel: low
+UsePocxray: false
+UsePocnuclei: false
+UsePocafrog: false
+UsePoccustom: false
+ExePathxray: ""
+ExePathnuclei: ""
+ExePathafrog: ""
+ExePathcustom: ""
+PocPathxray: ""
+PocPathnuclei: ""
+PocPathafrog: ""
+PocPathcustom: ""
+SelectPocsxray: ""
+SelectPocsnuclei: ""
+SelectPocsafrog: ""
+SelectPocscustom: ""
+PocThreadxray: "3"
+PocThreadnuclei: "3"
+PocThreadafrog: "3"
+PocArgsxray: webscan --plugins brute-force,cmd-injection,dirscan,jsonp,path-traversal,sqldet,ssrf,xss,fastjson,shiro,struts,thinkphp,xstream,phantasm
+PocArgsnuclei: -j -mhe 15 -ni
+PocArgsafrog: -doh
+PwdThreadStr: "5"
+PwdTimeoutStr: "3000"
+PwdRetryStr: "1"
+PwdOracleListen: orcl
+PwdFinger: true
+PwdSuffix: ""
+PwdExecCmd: whoami
+PwdUseInsideDict: true
+PwdCrackOneAccount: true
+PwdServices: ""
+DirSelectMode: 字典模式
+DirSelectMethod: GET
+DirRecursion: false
+DirExtFilter: js,gif,jpg,png,css
+DirCodeFilter: 400,404,5xx
+DirKeyFilter: ""
+DirLenFilter: ""
+DirFileExt: jsp,php,asp,aspx
+DirTimeDelayStr: "0"
+DirThreadStr: "50"
+DirCustomDictStr: ""
+JsThreadStr: "50"
+JsStepStr: "3"
+JsMaxStr: "999"
+JsOnlyMyJs: false
+JsCodeFilter: 400,404,5xx
+JsKeyFilter: ""
+JsLenFilter: ""
+JsMode: 深入模式
+HostThreadStr: ""
+HostPort: ""
+HostCodeFilter: ""
+HostLenFilter: ""
+BypassThreadStr: ""
+BypassRedirect: false
+BypassCodeFilter: ""
+ProxyListenAddr: ""
+VerifyWeb: https://www.baidu.com
+VerifyStr: 百度一下
+VerifyDel: false
+ProxyMode: pooling
+ProxyModeCfg: "10"
+FofaEnabled: false
+FofaQueryString: protocol=="socks5" && country="CN" && banner="Method:No Authentication"
+FofaQueryCount: "500"
+QuaKeEnabled: false
+QuaKeQueryString: 'service:socks5  AND country: "CN" AND response:"No authentication"'
+QuaKeQueryCount: "300"
+HunterEnabled: false
+HunterQueryString: protocol=="socks5"&&protocol.banner="No authentication"&&ip.country="CN"
+HunterQueryCount: "200"
+ProxyKeyMode: blockkey
+ProxyKeyWord: ""
+ProxyKeyAddr: ""
+CsPayloadWin: http://8.8.8.8/wincs.exe
+CsPayloadLinux: http://8.8.8.8/linuxcs
+ReverseIp: 8.8.8.8
+ReversePort: "8888"
+DecodeTab: ""
+ProjectOptions: ""
