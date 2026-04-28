@@ -94,6 +94,57 @@ def wait_for_file(file_path, timeout=300):
     log(f"错误: 文件未生成: {file_path}")
     return False
 
+
+def get_config_output_path():
+    try:
+        config_path = os.path.join(BASE_DIR, "config.yaml")
+        with open(config_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("CfgOutPath:"):
+                    path = line.split(":", 1)[1].strip().strip('"')
+                    if path:
+                        return path
+    except Exception as e:
+        log(f"警告: 读取 config.yaml 输出目录失败: {e}")
+    return None
+
+
+def wait_for_ehole_file(expected_path, timeout=300):
+    config_out_path = get_config_output_path()
+    candidate_paths = [expected_path]
+
+    if config_out_path:
+        config_candidate = os.path.join(config_out_path, os.path.basename(expected_path))
+        if config_candidate not in candidate_paths:
+            candidate_paths.append(config_candidate)
+
+    log(f"等待ehole结果文件生成: {' | '.join(candidate_paths)}")
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        for candidate_path in candidate_paths:
+            if not os.path.exists(candidate_path):
+                continue
+            if os.path.getsize(candidate_path) <= 0:
+                continue
+
+            if candidate_path != expected_path:
+                try:
+                    shutil.move(candidate_path, expected_path)
+                    log(f"已将ehole结果移动到目标目录: {expected_path}")
+                    return expected_path
+                except Exception as e:
+                    log(f"警告: 无法移动ehole结果文件 {candidate_path} -> {expected_path}: {e}")
+                    return candidate_path
+
+            log(f"ehole结果文件已生成: {candidate_path}")
+            return candidate_path
+
+        time.sleep(1)
+
+    log(f"错误: 未找到ehole结果文件: {' | '.join(candidate_paths)}")
+    return None
+
 # 生成不冲突的文件名
 def generate_unique_filename(base_dir, base_name, ext):
     counter = 1
@@ -299,13 +350,14 @@ def main():
             pass
         
         # 检查ehole结果文件是否生成
-        if not wait_for_file(ehole_output):
+        actual_ehole_output = wait_for_ehole_file(ehole_output)
+        if not actual_ehole_output:
             log("错误: ehole未生成结果文件")
             sys.exit(1)
-        
+
         # 美化ehole结果表格
         log("美化ehole结果表格...")
-        subprocess.run(["python", "process_data.py", ehole_output, ehole_output])
+        subprocess.run(["python", "process_data.py", actual_ehole_output, actual_ehole_output])
         log("ehole结果表格美化完成")
         
         log(f"自动化流程全部完成！所有结果保存在: {full_date_dir}")
