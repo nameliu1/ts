@@ -2,7 +2,6 @@ import os
 import time
 import datetime
 import sys
-import locale
 import subprocess
 import shutil
 import pandas as pd
@@ -40,45 +39,25 @@ def hide_python_console():
         except:
             log("警告: 无法隐藏 Python 控制台窗口")
 
-def get_command_encoding():
-    return locale.getpreferredencoding(False) or "utf-8"
-
-
 def run_command(command, stage_name, timeout=COMMAND_TIMEOUT):
     log(f"执行{stage_name}命令: {command}")
-    process = subprocess.Popen(
-        command,
-        shell=True,
-        cwd=BASE_DIR,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding=get_command_encoding(),
-        errors="replace",
-        bufsize=1,
-    )
-
-    output_lines = []
-    if process.stdout is not None:
-        for line in process.stdout:
-            line = line.rstrip()
-            if line:
-                output_lines.append(line)
-                log(f"[{stage_name}] {line}")
-
     try:
-        return_code = process.wait(timeout=timeout)
+        result = subprocess.run(
+            command,
+            shell=True,
+            cwd=BASE_DIR,
+            timeout=timeout,
+        )
     except subprocess.TimeoutExpired:
-        process.kill()
         log(f"错误: {stage_name} 执行超时")
-        return False, output_lines
+        return False
 
-    if return_code != 0:
-        log(f"错误: {stage_name} 退出码: {return_code}")
-        return False, output_lines
+    if result.returncode != 0:
+        log(f"错误: {stage_name} 退出码: {result.returncode}")
+        return False
 
     log(f"{stage_name} 执行完成")
-    return True, output_lines
+    return True
 
 def wait_for_file(file_path, timeout=300):
     log(f"等待文件生成: {file_path}")
@@ -288,7 +267,7 @@ def main():
         # 步骤1: 执行spray扫描
         log("步骤1: 执行spray扫描...")
         spray_cmd = f'spray.exe -l "{URL_FILE}" -d "{DIR_FILE}" -f "{JSON_FILE}"'
-        spray_ok, _ = run_command(spray_cmd, "spray")
+        spray_ok = run_command(spray_cmd, "spray")
         if not spray_ok:
             log("错误: spray执行失败")
             sys.exit(1)
@@ -338,7 +317,7 @@ def main():
         ehole_output = generate_unique_filename(full_date_dir, ehole_base, ".xlsx")
         
         ehole_cmd = f'ehole finger -l "{filtered_txt_path}" -o "{ehole_output}" -t 10'
-        ehole_ok, ehole_logs = run_command(ehole_cmd, "ehole")
+        ehole_ok = run_command(ehole_cmd, "ehole")
         if not ehole_ok:
             log("错误: ehole执行失败")
             sys.exit(1)
@@ -346,10 +325,7 @@ def main():
         # 检查ehole结果文件是否生成
         actual_ehole_output = wait_for_ehole_file(ehole_output, timeout=30)
         if not actual_ehole_output:
-            if ehole_logs:
-                log(f"错误: ehole未生成结果文件，最后一条输出: {ehole_logs[-1]}")
-            else:
-                log("错误: ehole未生成结果文件，且未捕获到任何输出")
+            log("错误: ehole未生成结果文件")
             sys.exit(1)
 
         # 美化ehole结果表格
