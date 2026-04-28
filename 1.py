@@ -2,7 +2,7 @@ import os
 import time
 import datetime
 import sys
-import psutil
+import locale
 import subprocess
 import shutil
 import pandas as pd
@@ -17,10 +17,9 @@ TXT_FILE = os.path.join(BASE_DIR, "res_processed.txt")    # 提取的URL列表
 # Default to showing the console so double-click or terminal runs do not
 # look like an immediate crash when the script hides its own window.
 HIDE_PYTHON_CONSOLE = False
-MONITOR_INTERVAL = 5  # 进程监控间隔（秒）
+COMMAND_TIMEOUT = 1800
 STATUS_CODE_COL_INDEX = 9  # J列（Excel列索引从0开始，J列对应索引9）【Spray状态码结果在此列】
 URL_COL_INDEX = 4  # E列（根据实际Excel列调整）
-EHOLE_QUICK_TIMEOUT = 3  # ehole快速完成的超时时间（秒）
 
 # 需要删除的过程文件列表
 TO_DELETE_FILES = [
@@ -41,47 +40,45 @@ def hide_python_console():
         except:
             log("警告: 无法隐藏 Python 控制台窗口")
 
-def run_native_command(command, process_name):
-    log(f"执行命令: {command}")
-    # 仅针对ehole添加2秒延迟，避免进程快速结束导致监控失败
-    if process_name.lower() == "ehole.exe":
-        os.system(f'start cmd /c "{command} & ping -n 2 127.0.0.1 >nul"')
-    else:
-        os.system(f'start cmd /c "{command}"')
+def get_command_encoding():
+    return locale.getpreferredencoding(False) or "utf-8"
 
-def monitor_process(process_name, timeout=3600):
-    log(f"监控进程: {process_name}")
-    start_time = time.time()
-    
-    # 特殊处理ehole进程的快速完成情况
-    is_ehole = process_name.lower() == "ehole.exe"
-    quick_timeout = EHOLE_QUICK_TIMEOUT
-    
-    # 等待进程启动
-    while time.time() - start_time < timeout:
-        if any(proc.name().lower() == process_name.lower() for proc in psutil.process_iter()):
-            log(f"进程已启动: {process_name}")
-            break
-            
-        # 检查是否是ehole并且已经超过快速超时时间
-        if is_ehole and (time.time() - start_time > quick_timeout):
-            log(f"警告: ehole在{quick_timeout}秒内未启动，可能已快速完成")
-            return True
-            
-        time.sleep(1)
-    else:
-        log(f"错误: 等待 {process_name} 启动超时")
-        return False
-    
-    start_time = time.time()
-    # 等待进程结束
-    while time.time() - start_time < timeout:
-        if not any(proc.name().lower() == process_name.lower() for proc in psutil.process_iter()):
-            log(f"进程已结束: {process_name}")
-            return True
-        time.sleep(1)
-    log(f"错误: {process_name} 运行超时")
-    return False
+
+def run_command(command, stage_name, timeout=COMMAND_TIMEOUT):
+    log(f"执行{stage_name}命令: {command}")
+    process = subprocess.Popen(
+        command,
+        shell=True,
+        cwd=BASE_DIR,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding=get_command_encoding(),
+        errors="replace",
+        bufsize=1,
+    )
+
+    output_lines = []
+    if process.stdout is not None:
+        for line in process.stdout:
+            line = line.rstrip()
+            if line:
+                output_lines.append(line)
+                log(f"[{stage_name}] {line}")
+
+    try:
+        return_code = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        log(f"错误: {stage_name} 执行超时")
+        return False, output_lines
+
+    if return_code != 0:
+        log(f"错误: {stage_name} 退出码: {return_code}")
+        return False, output_lines
+
+    log(f"{stage_name} 执行完成")
+    return True, output_lines
 
 def wait_for_file(file_path, timeout=300):
     log(f"等待文件生成: {file_path}")
@@ -291,9 +288,9 @@ def main():
         # 步骤1: 执行spray扫描
         log("步骤1: 执行spray扫描...")
         spray_cmd = f'spray.exe -l "{URL_FILE}" -d "{DIR_FILE}" -f "{JSON_FILE}"'
-        run_native_command(spray_cmd, "spray.exe")
-        if not monitor_process("spray.exe", timeout=1800):
-            log("错误: spray执行失败或超时")
+        spray_ok, _ = run_command(spray_cmd, "spray")
+        if not spray_ok:
+            log("错误: spray执行失败")
             sys.exit(1)
         if not wait_for_file(JSON_FILE):
             log("错误: spray未生成结果文件")
@@ -341,18 +338,18 @@ def main():
         ehole_output = generate_unique_filename(full_date_dir, ehole_base, ".xlsx")
         
         ehole_cmd = f'ehole finger -l "{filtered_txt_path}" -o "{ehole_output}" -t 10'
-        run_native_command(ehole_cmd, "ehole.exe")
-        
-        # 监控ehole进程并等待结束
-        if not monitor_process("ehole.exe", timeout=1800):
-            log("错误: ehole执行失败或超时")
-            # 即使监控失败，也继续检查文件是否存在
-            pass
-        
+        ehole_ok, ehole_logs = run_command(ehole_cmd, "ehole")
+        if not ehole_ok:
+            log("错误: ehole执行失败")
+            sys.exit(1)
+
         # 检查ehole结果文件是否生成
-        actual_ehole_output = wait_for_ehole_file(ehole_output)
+        actual_ehole_output = wait_for_ehole_file(ehole_output, timeout=30)
         if not actual_ehole_output:
-            log("错误: ehole未生成结果文件")
+            if ehole_logs:
+                log(f"错误: ehole未生成结果文件，最后一条输出: {ehole_logs[-1]}")
+            else:
+                log("错误: ehole未生成结果文件，且未捕获到任何输出")
             sys.exit(1)
 
         # 美化ehole结果表格
