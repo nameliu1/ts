@@ -210,10 +210,16 @@ def archive_empty_spray_result(output_dir):
     if not os.path.exists(JSON_FILE):
         with open(JSON_FILE, "w", encoding="utf-8") as f:
             pass
-    spray_json_base = f"spray_original_{datetime.datetime.now().strftime('%Y%m%d')}_empty"
-    spray_json_dest = generate_unique_filename(output_dir, spray_json_base, ".json")
+    date_str = datetime.datetime.now().strftime("%Y%m%d")
+    spray_json_dest = generate_unique_filename(output_dir, f"spray_original_{date_str}_empty", ".json")
+    summary_dest = generate_unique_filename(output_dir, f"spray_no_findings_{date_str}", ".txt")
     shutil.move(JSON_FILE, spray_json_dest)
+    with open(summary_dest, "w", encoding="utf-8") as f:
+        f.write("spray completed successfully but produced no JSON records.\n")
+        f.write(f"url_count={count_nonempty_lines(URL_FILE)}\n")
+        f.write(f"dict_count={count_nonempty_lines(DIR_FILE)}\n")
     log(f"spray未发现有效结果，已归档空结果文件: {spray_json_dest}")
+    log(f"无发现说明文件: {summary_dest}")
     log("流程结束：未发现状态码200的目录扫描结果，跳过process_data和ehole。")
     return 0
 
@@ -477,21 +483,13 @@ def clean_process_files():
 def process_spray_output(json_file, excel_file, txt_file):
     log(f"开始处理spray结果: {json_file}")
     log("process_data.py 处理大文件时可能持续较久，期间会显示实时输出。")
-    process = subprocess.Popen(
-        ["python", "process_data.py", json_file, excel_file],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-    if process.stdout is not None:
-        for line in process.stdout:
-            line = line.rstrip()
-            if line:
-                log(f"[process_data] {line}")
-    return_code = process.wait()
-    if return_code != 0:
-        log(f"错误: 数据处理失败，退出码: {return_code}")
+    process_logger = LoggerWriter(lambda line: log(f"[process_data] {line}"))
+    with redirect_stdout(process_logger), redirect_stderr(process_logger):
+        import process_data as process_data_module
+        result_code = process_data_module.process_data(json_file, excel_file)
+    process_logger.flush()
+    if result_code != 0:
+        log(f"错误: 数据处理失败，退出码: {result_code}")
         return False
     if not os.path.exists(excel_file):
         log(f"错误: 处理后的Excel文件未生成: {excel_file}")
