@@ -85,48 +85,57 @@ def hide_python_console():
             log("警告: 无法隐藏 Python 控制台窗口")
 
 
-def run_command(command, stage_name, timeout=COMMAND_TIMEOUT):
-    log(f"执行{stage_name}命令: {command}")
+def run_command(args, stage_name, timeout=COMMAND_TIMEOUT):
+    log(f"执行{stage_name}命令: {' '.join(args)}")
     proc = subprocess.Popen(
-        command,
-        shell=True,
+        args,
+        shell=False,
         cwd=BASE_DIR,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
+        stdin=subprocess.DEVNULL,
+        stdout=None,
+        stderr=None,
     )
-
-    # 实时输出子进程的每一行，避免长时间无反馈
     start_time = time.time()
-    last_activity = start_time
-    line_count = 0
 
     try:
-        # 逐行读取（阻塞直到有输出或进程结束）
-        if proc.stdout:
-            for line in proc.stdout:
-                line = line.rstrip()
-                if line:
-                    # 每行都打印并记录，让用户看到实时进度
-                    log(f"[{stage_name}] {line}")
-                    line_count += 1
-                    last_activity = time.time()
+        while True:
+            return_code = proc.poll()
+            if return_code is not None:
+                elapsed = time.time() - start_time
+                log(f"{stage_name} 执行结束，耗时 {elapsed:.1f} 秒，退出码: {return_code}")
+                return return_code == 0
 
-        # 等待进程结束
-        return_code = proc.wait()
+            if time.time() - start_time > timeout:
+                log(f"错误: {stage_name} 执行超时 ({timeout}秒)，正在强制终止进程树...")
+                terminate_process_tree(proc, stage_name)
+                return False
 
-        elapsed = time.time() - start_time
-        log(f"{stage_name} 执行完成，耗时 {elapsed:.1f} 秒，共 {line_count} 行输出，退出码: {return_code}")
+            time.sleep(1)
 
-        if return_code != 0:
-            return False
-        return True
-
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        log(f"错误: {stage_name} 执行超时 ({timeout}秒)，已强制终止")
+    except Exception as e:
+        log(f"{stage_name} 执行异常: {e}")
+        terminate_process_tree(proc, stage_name)
         return False
+
+
+def terminate_process_tree(proc, stage_name):
+    try:
+        import psutil
+        parent = psutil.Process(proc.pid)
+        children = parent.children(recursive=True)
+        for child in children:
+            child.terminate()
+        parent.terminate()
+        gone, alive = psutil.wait_procs([parent, *children], timeout=5)
+        for process in alive:
+            process.kill()
+        log(f"{stage_name} 进程树已终止，正常退出 {len(gone)} 个，强制结束 {len(alive)} 个")
+    except ImportError:
+        log("psutil 未安装，只能终止主进程")
+        proc.kill()
+    except Exception as e:
+        log(f"终止进程树时出错: {e}")
+        proc.kill()
 
 
 def wait_for_file(file_path, timeout=300):
@@ -514,7 +523,7 @@ def run_pipeline():
     clean_process_files()
 
     log("步骤1: 执行spray扫描...")
-    spray_cmd = f'spray.exe -l {quote_path(URL_FILE)} -d {quote_path(DIR_FILE)} -f {quote_path(JSON_FILE)}'
+    spray_cmd = ["spray.exe", "-l", "url.txt", "-d", "dirv2.txt", "-f", "res.json"]
     if not run_command(spray_cmd, "spray"):
         log("错误: spray执行失败")
         return 1
@@ -563,11 +572,16 @@ def run_pipeline():
     if config_out_path:
         log(f"ehole配置输出目录: {config_out_path}")
 
-    ehole_cmd = (
-        f'{quote_path(ehole_executable)} finger '
-        f'-l {quote_path(filtered_txt_path)} '
-        f'-o {quote_path(ehole_output)} -t 10'
-    )
+    ehole_cmd = [
+        ehole_executable,
+        "finger",
+        "-l",
+        filtered_txt_path,
+        "-o",
+        ehole_output,
+        "-t",
+        "10",
+    ]
     if not run_command(ehole_cmd, "ehole"):
         log(f"错误: ehole执行失败，输入文件: {filtered_txt_path}，URL数量: {len(ehole_urls)}")
         return 1
