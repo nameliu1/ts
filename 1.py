@@ -1,23 +1,31 @@
 import datetime
 import glob
+import json
 import os
 import shutil
 import subprocess
 import sys
 import time
 from contextlib import redirect_stderr, redirect_stdout
+from urllib.parse import urlsplit
 
 import pandas as pd
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 URL_FILE = os.path.join(BASE_DIR, "url.txt")
 DIR_FILE = os.path.join(BASE_DIR, "dirv2.txt")
+SECONDARY_DIR_FILE = os.path.join(BASE_DIR, "dirv3.txt")
 JSON_FILE = os.path.join(BASE_DIR, "res.json")
 EXCEL_FILE = os.path.join(BASE_DIR, "res_processed.xlsx")
 TXT_FILE = os.path.join(BASE_DIR, "res_processed.txt")
 HIDE_PYTHON_CONSOLE = False
 COMMAND_TIMEOUT = 86400  # 24小时，覆盖最长扫描场景
 EHOLE_WAIT_TIMEOUT = 600  # ehole 文件等待增加到 10 分钟
+SPRAY_POOL = "20"
+SPRAY_THREAD = "50"
+SPRAY_TIMEOUT = "3"
+SPRAY_ERROR_THRESHOLD = "80"
+SPRAY_CHECK_PERIOD = "500"
 STATUS_CODE_COL_INDEX = 9
 URL_COL_INDEX = 4
 URL_COLUMN_CANDIDATES = ["url", "direct url", "directurl", "网址", "链接"]
@@ -184,6 +192,7 @@ def log_input_diagnostics(stage_name, executable_path):
     log(f"{stage_name} 可执行文件: {executable_path}")
     log(f"url.txt: {describe_file(URL_FILE)}，非空行数 {count_nonempty_lines(URL_FILE)}")
     log(f"dirv2.txt: {describe_file(DIR_FILE)}，非空行数 {count_nonempty_lines(DIR_FILE)}")
+    log(f"dirv3.txt: {describe_file(SECONDARY_DIR_FILE)}，非空行数 {count_nonempty_lines(SECONDARY_DIR_FILE)}")
     log(f"res.json: {describe_file(JSON_FILE)}")
 
 
@@ -220,8 +229,7 @@ def archive_empty_spray_result(output_dir):
         f.write(f"dict_count={count_nonempty_lines(DIR_FILE)}\n")
     log(f"spray未发现有效结果，已归档空结果文件: {spray_json_dest}")
     log(f"无发现说明文件: {summary_dest}")
-    log("流程结束：未发现状态码200的目录扫描结果，跳过process_data和ehole。")
-    return 0
+    return spray_json_dest
 
 
 def get_config_output_path():
@@ -293,6 +301,66 @@ def read_valid_urls(file_path):
             seen.add(url)
             urls.append(url)
     return urls
+
+
+def normalize_base_url(url):
+    parsed = urlsplit(str(url).strip())
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def extract_base_urls_from_json(json_file):
+    bases = set()
+    if not os.path.exists(json_file) or os.path.getsize(json_file) <= 0:
+        return bases
+    with open(json_file, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            for value in data.values():
+                if isinstance(value, str) and value.startswith(("http://", "https://")):
+                    base_url = normalize_base_url(value)
+                    if base_url:
+                        bases.add(base_url)
+    return bases
+
+
+def write_url_list(file_path, urls):
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(urls))
+        if urls:
+            f.write("\n")
+
+
+def merge_url_files(file_paths, output_file):
+    merged = []
+    seen = set()
+    for file_path in file_paths:
+        if not file_path:
+            continue
+        for url in read_valid_urls(file_path):
+            if url in seen:
+                continue
+            seen.add(url)
+            merged.append(url)
+    write_url_list(output_file, merged)
+    return len(merged)
+
+
+def ask_yes_no(prompt):
+    while True:
+        answer = input(f"{prompt} [y/N]: ").strip().lower()
+        if answer in ("", "n", "no"):
+            return False
+        if answer in ("y", "yes"):
+            return True
+        print("请输入 y 或 n")
 
 
 def validate_ehole_input(file_path):
@@ -570,6 +638,131 @@ def filter_status_200(excel_file, output_dir, count):
         return None
 
 
+def run_spray_scan(spray_executable, input_file, dict_file, output_file, stage_name):
+    if os.path.exists(output_file):
+        os.remove(output_file)
+    command = [
+        spray_executable,
+        "-l",
+        os.path.relpath(input_file, BASE_DIR),
+        "-d",
+        os.path.relpath(dict_file, BASE_DIR),
+        "-f",
+        os.path.relpath(output_file, BASE_DIR),
+        "--force",
+        "--no-color",
+        "--no-stat",
+        "-P",
+        SPRAY_POOL,
+        "-t",
+        SPRAY_THREAD,
+        "-T",
+        SPRAY_TIMEOUT,
+        "--error-threshold",
+        SPRAY_ERROR_THRESHOLD,
+        "--check-period",
+        SPRAY_CHECK_PERIOD,
+    ]
+    if not run_command(command, stage_name):
+        log(f"错误: {stage_name}执行失败")
+        return False
+    return wait_for_file(output_file, timeout=10)
+
+
+def maybe_run_secondary_scan(spray_executable, primary_json_path, output_dir):
+    input_urls = read_valid_urls(URL_FILE)
+    matched_bases = extract_base_urls_from_json(primary_json_path)
+    unmatched_urls = [url for url in input_urls if normalize_base_url(url) not in matched_bases]
+    log(f"dirv2扫描命中资产 {len(matched_bases)} 个，未命中资产 {len(unmatched_urls)} 个")
+    if not unmatched_urls:
+        return None
+    if not os.path.exists(SECONDARY_DIR_FILE) or os.path.getsize(SECONDARY_DIR_FILE) <= 0:
+        log(f"跳过dirv3二次扫描: dirv3.txt不存在或为空: {SECONDARY_DIR_FILE}")
+        return None
+    if not ask_yes_no(f"是否用dirv3.txt重新扫描 {len(unmatched_urls)} 个未命中资产"):
+        log("用户选择跳过dirv3二次扫描")
+        return None
+
+    date_str = datetime.datetime.now().strftime("%Y%m%d")
+    secondary_input = generate_unique_filename(output_dir, f"{date_str}_dirv3_zero_output_urls", ".txt")
+    secondary_json = generate_unique_filename(BASE_DIR, "res_dirv3", ".json")
+    write_url_list(secondary_input, unmatched_urls)
+    log(f"dirv3二次扫描输入已保存: {secondary_input}")
+    log(f"开始dirv3二次扫描，字典 {count_nonempty_lines(SECONDARY_DIR_FILE)} 条")
+    if not run_spray_scan(spray_executable, secondary_input, SECONDARY_DIR_FILE, secondary_json, "spray-dirv3"):
+        if os.path.exists(secondary_json) and os.path.getsize(secondary_json) == 0:
+            secondary_empty = generate_unique_filename(output_dir, f"spray_dirv3_original_{date_str}_empty", ".json")
+            shutil.move(secondary_json, secondary_empty)
+            log(f"dirv3二次扫描无发现，已归档空结果: {secondary_empty}")
+        else:
+            log("dirv3二次扫描未生成有效结果")
+        return None
+
+    secondary_dest = generate_unique_filename(output_dir, f"spray_dirv3_original_{date_str}", ".json")
+    shutil.move(secondary_json, secondary_dest)
+    log(f"dirv3二次扫描原始结果已保存: {secondary_dest}")
+    return secondary_dest
+
+
+def run_ehole_stage(input_txt_path, output_dir):
+    log("步骤4: 执行ehole指纹识别...")
+    ehole_urls = validate_ehole_input(input_txt_path)
+    if not ehole_urls:
+        return 1
+
+    ehole_executable = resolve_ehole_executable()
+    if not ehole_executable:
+        log("错误: 未找到ehole可执行文件，请确认仓库内存在ehole.exe或系统PATH可访问ehole")
+        return 1
+
+    ehole_base = f"ehole_result_{datetime.datetime.now().strftime('%Y%m%d')}"
+    ehole_output = generate_unique_filename(output_dir, ehole_base, ".xlsx")
+    config_out_path = get_config_output_path()
+    log(f"ehole可执行文件: {ehole_executable}")
+    log(f"ehole目标输出路径: {ehole_output}")
+    if config_out_path:
+        log(f"ehole配置输出目录: {config_out_path}")
+
+    ehole_cmd = [
+        ehole_executable,
+        "finger",
+        "-l",
+        input_txt_path,
+        "-o",
+        ehole_output,
+        "-t",
+        "10",
+    ]
+    if not run_command(ehole_cmd, "ehole"):
+        log(f"错误: ehole执行失败，输入文件: {input_txt_path}，URL数量: {len(ehole_urls)}")
+        return 1
+
+    actual_ehole_output = wait_for_ehole_file(ehole_output)
+    if not actual_ehole_output:
+        log(f"错误: ehole未生成结果文件，输入文件: {input_txt_path}，URL数量: {len(ehole_urls)}")
+        return 1
+
+    if not actual_ehole_output.lower().endswith((".xlsx", ".xls")):
+        log(f"错误: ehole产出文件不是Excel工作簿: {actual_ehole_output}")
+        return 1
+    if os.path.getsize(actual_ehole_output) <= 0:
+        log(f"错误: ehole产出文件为空: {actual_ehole_output}")
+        return 1
+
+    log("美化ehole结果表格...")
+    process_logger = LoggerWriter(lambda line: log(f"[process_data] {line}"))
+    with redirect_stdout(process_logger), redirect_stderr(process_logger):
+        import process_data as process_data_module
+        result_code = process_data_module.process_data(actual_ehole_output, actual_ehole_output)
+    process_logger.flush()
+    if result_code != 0:
+        log(f"错误: ehole结果后处理失败，文件可能不是可读工作簿: {actual_ehole_output}")
+        return 1
+    log("ehole结果表格美化完成")
+    log(f"自动化流程全部完成！所有结果保存在: {output_dir}")
+    return 0
+
+
 def run_pipeline():
     hide_python_console()
     log("开始自动化漏洞扫描和指纹识别流程")
@@ -590,14 +783,24 @@ def run_pipeline():
     log_input_diagnostics("spray", spray_executable)
     if not validate_scan_inputs():
         return 1
-    spray_cmd = [spray_executable, "-l", "url.txt", "-d", "dirv2.txt", "-f", "res.json", "--force"]
-    if not run_command(spray_cmd, "spray"):
-        log("错误: spray执行失败")
-        return 1
-    if not wait_for_file(JSON_FILE, timeout=10):
+    if not run_spray_scan(spray_executable, URL_FILE, DIR_FILE, JSON_FILE, "spray"):
         log_input_diagnostics("spray", spray_executable)
         if os.path.exists(JSON_FILE) and os.path.getsize(JSON_FILE) == 0:
-            return archive_empty_spray_result(full_date_dir)
+            empty_json_dest = archive_empty_spray_result(full_date_dir)
+            secondary_json_dest = maybe_run_secondary_scan(spray_executable, empty_json_dest, full_date_dir)
+            if not secondary_json_dest:
+                log("流程结束：dirv2和dirv3均未产生可处理结果。")
+                return 0
+            secondary_excel = generate_unique_filename(full_date_dir, f"spray_dirv3_processed_{datetime.datetime.now().strftime('%Y%m%d')}", ".xlsx")
+            secondary_txt = os.path.splitext(secondary_excel)[0] + ".txt"
+            if not process_spray_output(secondary_json_dest, secondary_excel, secondary_txt):
+                log("错误: dirv3二次扫描结果处理失败")
+                return 1
+            filtered_txt_path = filter_status_200(secondary_excel, full_date_dir, 1)
+            if not filtered_txt_path:
+                log("流程结束：dirv3二次扫描未产生状态码200 URL。")
+                return 0
+            return run_ehole_stage(filtered_txt_path, full_date_dir)
         log("错误: spray退出成功但未生成res.json")
         log("提示: 当前url.txt行数很少时，可能是输入资产文件未正确覆盖；请确认你运行前保存的是目标url.txt")
         return 1
@@ -625,63 +828,25 @@ def run_pipeline():
     shutil.move(unique_excel_file, spray_excel_dest)
     log(f"已移动Spray处理后Excel: {spray_excel_dest}")
 
-    log("步骤4: 执行ehole指纹识别...")
-    ehole_urls = validate_ehole_input(filtered_txt_path)
-    if not ehole_urls:
-        return 1
+    secondary_filtered = None
+    secondary_json_dest = maybe_run_secondary_scan(spray_executable, spray_json_dest, full_date_dir)
+    if secondary_json_dest:
+        secondary_excel = generate_unique_filename(full_date_dir, f"spray_dirv3_processed_{datetime.datetime.now().strftime('%Y%m%d')}", ".xlsx")
+        secondary_txt = os.path.splitext(secondary_excel)[0] + ".txt"
+        if process_spray_output(secondary_json_dest, secondary_excel, secondary_txt):
+            secondary_filtered = filter_status_200(secondary_excel, full_date_dir, 2)
+            if secondary_filtered:
+                log(f"dirv3二次扫描状态码200 URL已保存: {secondary_filtered}")
+        else:
+            log("警告: dirv3二次扫描结果处理失败，保留原始JSON结果")
 
-    ehole_executable = resolve_ehole_executable()
-    if not ehole_executable:
-        log("错误: 未找到ehole可执行文件，请确认仓库内存在ehole.exe或系统PATH可访问ehole")
-        return 1
+    ehole_input_path = filtered_txt_path
+    if secondary_filtered:
+        ehole_input_path = generate_unique_filename(full_date_dir, f"{datetime.datetime.now().strftime('%Y%m%d')}_ehole_merged_urls", ".txt")
+        merged_count = merge_url_files([filtered_txt_path, secondary_filtered], ehole_input_path)
+        log(f"已合并dirv2和dirv3命中URL供ehole使用: {ehole_input_path}，共 {merged_count} 条")
 
-    ehole_base = f"ehole_result_{datetime.datetime.now().strftime('%Y%m%d')}"
-    ehole_output = generate_unique_filename(full_date_dir, ehole_base, ".xlsx")
-    config_out_path = get_config_output_path()
-    log(f"ehole可执行文件: {ehole_executable}")
-    log(f"ehole目标输出路径: {ehole_output}")
-    if config_out_path:
-        log(f"ehole配置输出目录: {config_out_path}")
-
-    ehole_cmd = [
-        ehole_executable,
-        "finger",
-        "-l",
-        filtered_txt_path,
-        "-o",
-        ehole_output,
-        "-t",
-        "10",
-    ]
-    if not run_command(ehole_cmd, "ehole"):
-        log(f"错误: ehole执行失败，输入文件: {filtered_txt_path}，URL数量: {len(ehole_urls)}")
-        return 1
-
-    actual_ehole_output = wait_for_ehole_file(ehole_output)
-    if not actual_ehole_output:
-        log(f"错误: ehole未生成结果文件，输入文件: {filtered_txt_path}，URL数量: {len(ehole_urls)}")
-        return 1
-
-    if not actual_ehole_output.lower().endswith((".xlsx", ".xls")):
-        log(f"错误: ehole产出文件不是Excel工作簿: {actual_ehole_output}")
-        return 1
-    if os.path.getsize(actual_ehole_output) <= 0:
-        log(f"错误: ehole产出文件为空: {actual_ehole_output}")
-        return 1
-
-    log("美化ehole结果表格...")
-    process_logger = LoggerWriter(lambda line: log(f"[process_data] {line}"))
-    with redirect_stdout(process_logger), redirect_stderr(process_logger):
-        import process_data as process_data_module
-        result_code = process_data_module.process_data(actual_ehole_output, actual_ehole_output)
-    process_logger.flush()
-    if result_code != 0:
-        log(f"错误: ehole结果后处理失败，文件可能不是可读工作簿: {actual_ehole_output}")
-        return 1
-    log("ehole结果表格美化完成")
-
-    log(f"自动化流程全部完成！所有结果保存在: {full_date_dir}")
-    return 0
+    return run_ehole_stage(ehole_input_path, full_date_dir)
 
 
 def main():
