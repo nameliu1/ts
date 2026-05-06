@@ -149,7 +149,7 @@ def wait_for_file(file_path, timeout=300):
             if current_size > 0:
                 if current_size == last_size:
                     stable_seconds += 1
-                    if stable_seconds >= 3:  # 稳定 3 秒才认为完成
+                    if stable_seconds >= 3:
                         log(f"文件已稳定生成: {file_path} ({current_size} 字节)")
                         return True
                 else:
@@ -159,6 +159,19 @@ def wait_for_file(file_path, timeout=300):
         time.sleep(1)
     log(f"错误: 文件超时未生成: {file_path}")
     return False
+
+
+def describe_file(file_path):
+    if os.path.exists(file_path):
+        return f"存在，大小 {os.path.getsize(file_path)} 字节"
+    return "不存在"
+
+
+def log_input_diagnostics(stage_name, executable_path):
+    log(f"{stage_name} 可执行文件: {executable_path}")
+    log(f"url.txt: {describe_file(URL_FILE)}")
+    log(f"dirv2.txt: {describe_file(DIR_FILE)}")
+    log(f"res.json: {describe_file(JSON_FILE)}")
 
 
 def get_config_output_path():
@@ -195,21 +208,26 @@ def quote_path(path):
     return f'"{path}"'
 
 
-def resolve_ehole_executable():
-    local_candidates = [
-        os.path.join(BASE_DIR, "ehole.exe"),
-        os.path.join(BASE_DIR, "ehole"),
-    ]
-    for candidate in local_candidates:
+def resolve_local_executable(*names):
+    for name in names:
+        candidate = os.path.join(BASE_DIR, name)
         if os.path.isfile(candidate):
             return candidate
 
-    for candidate in ("ehole.exe", "ehole"):
-        resolved = shutil.which(candidate)
+    for name in names:
+        resolved = shutil.which(name)
         if resolved:
             return resolved
 
     return None
+
+
+def resolve_spray_executable():
+    return resolve_local_executable("spray.exe", "spray")
+
+
+def resolve_ehole_executable():
+    return resolve_local_executable("ehole.exe", "ehole")
 
 
 def read_valid_urls(file_path):
@@ -523,12 +541,18 @@ def run_pipeline():
     clean_process_files()
 
     log("步骤1: 执行spray扫描...")
-    spray_cmd = ["spray.exe", "-l", "url.txt", "-d", "dirv2.txt", "-f", "res.json"]
+    spray_executable = resolve_spray_executable()
+    if not spray_executable:
+        log("错误: 未找到spray可执行文件，请确认仓库内存在spray.exe或系统PATH可访问spray")
+        return 1
+    log_input_diagnostics("spray", spray_executable)
+    spray_cmd = [spray_executable, "-l", "url.txt", "-d", "dirv2.txt", "-f", "res.json"]
     if not run_command(spray_cmd, "spray"):
         log("错误: spray执行失败")
         return 1
-    if not wait_for_file(JSON_FILE):
-        log("错误: spray未生成结果文件")
+    if not wait_for_file(JSON_FILE, timeout=10):
+        log("错误: spray退出成功但未生成res.json，请优先检查上方的spray可执行文件路径和输入文件大小")
+        log_input_diagnostics("spray", spray_executable)
         return 1
 
     log("步骤2: 处理spray结果，提取有效URL...")
