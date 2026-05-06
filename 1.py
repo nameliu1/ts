@@ -24,7 +24,9 @@ URL_COLUMN_CANDIDATES = ["url", "direct url", "directurl", "网址", "链接"]
 STATUS_COLUMN_CANDIDATES = ["status", "status code", "status_code", "code", "状态码", "响应码", "http code"]
 TO_DELETE_FILES = [
     os.path.join(BASE_DIR, "url.txt.stat"),
+    os.path.join(BASE_DIR, "res.json"),
     os.path.join(BASE_DIR, "res_processed.txt"),
+    os.path.join(BASE_DIR, "res_processed.xlsx"),
 ]
 LOG_FILE_PATH = None
 
@@ -167,11 +169,41 @@ def describe_file(file_path):
     return "不存在"
 
 
+def count_nonempty_lines(file_path):
+    if not os.path.exists(file_path):
+        return 0
+    count = 0
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if line.strip():
+                count += 1
+    return count
+
+
 def log_input_diagnostics(stage_name, executable_path):
     log(f"{stage_name} 可执行文件: {executable_path}")
-    log(f"url.txt: {describe_file(URL_FILE)}")
-    log(f"dirv2.txt: {describe_file(DIR_FILE)}")
+    log(f"url.txt: {describe_file(URL_FILE)}，非空行数 {count_nonempty_lines(URL_FILE)}")
+    log(f"dirv2.txt: {describe_file(DIR_FILE)}，非空行数 {count_nonempty_lines(DIR_FILE)}")
     log(f"res.json: {describe_file(JSON_FILE)}")
+
+
+def validate_scan_inputs():
+    if not os.path.exists(URL_FILE) or os.path.getsize(URL_FILE) <= 0:
+        log(f"错误: url.txt不存在或为空: {URL_FILE}")
+        return False
+    if not os.path.exists(DIR_FILE) or os.path.getsize(DIR_FILE) <= 0:
+        log(f"错误: dirv2.txt不存在或为空: {DIR_FILE}")
+        return False
+    url_count = count_nonempty_lines(URL_FILE)
+    dict_count = count_nonempty_lines(DIR_FILE)
+    if url_count == 0:
+        log("错误: url.txt没有有效非空行")
+        return False
+    if dict_count == 0:
+        log("错误: dirv2.txt没有有效非空行")
+        return False
+    log(f"扫描输入确认: URL {url_count} 条，字典 {dict_count} 条")
+    return True
 
 
 def get_config_output_path():
@@ -546,13 +578,16 @@ def run_pipeline():
         log("错误: 未找到spray可执行文件，请确认仓库内存在spray.exe或系统PATH可访问spray")
         return 1
     log_input_diagnostics("spray", spray_executable)
-    spray_cmd = [spray_executable, "-l", "url.txt", "-d", "dirv2.txt", "-f", "res.json"]
+    if not validate_scan_inputs():
+        return 1
+    spray_cmd = [spray_executable, "-l", "url.txt", "-d", "dirv2.txt", "-f", "res.json", "--force"]
     if not run_command(spray_cmd, "spray"):
         log("错误: spray执行失败")
         return 1
     if not wait_for_file(JSON_FILE, timeout=10):
-        log("错误: spray退出成功但未生成res.json，请优先检查上方的spray可执行文件路径和输入文件大小")
+        log("错误: spray退出成功但未生成有效res.json")
         log_input_diagnostics("spray", spray_executable)
+        log("提示: 当前url.txt行数很少时，可能是输入资产文件未正确覆盖；请确认你运行前保存的是目标url.txt")
         return 1
 
     log("步骤2: 处理spray结果，提取有效URL...")
