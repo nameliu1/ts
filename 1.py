@@ -16,8 +16,8 @@ JSON_FILE = os.path.join(BASE_DIR, "res.json")
 EXCEL_FILE = os.path.join(BASE_DIR, "res_processed.xlsx")
 TXT_FILE = os.path.join(BASE_DIR, "res_processed.txt")
 HIDE_PYTHON_CONSOLE = False
-COMMAND_TIMEOUT = 1800
-EHOLE_WAIT_TIMEOUT = 180
+COMMAND_TIMEOUT = 86400  # 24小时，覆盖最长扫描场景
+EHOLE_WAIT_TIMEOUT = 600  # ehole 文件等待增加到 10 分钟
 STATUS_CODE_COL_INDEX = 9
 URL_COL_INDEX = 4
 URL_COLUMN_CANDIDATES = ["url", "direct url", "directurl", "网址", "链接"]
@@ -87,34 +87,68 @@ def hide_python_console():
 
 def run_command(command, stage_name, timeout=COMMAND_TIMEOUT):
     log(f"执行{stage_name}命令: {command}")
+    proc = subprocess.Popen(
+        command,
+        shell=True,
+        cwd=BASE_DIR,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    # 实时输出子进程的每一行，避免长时间无反馈
+    start_time = time.time()
+    last_activity = start_time
+    line_count = 0
+
     try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            cwd=BASE_DIR,
-            timeout=timeout,
-        )
+        # 逐行读取（阻塞直到有输出或进程结束）
+        if proc.stdout:
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    # 每行都打印并记录，让用户看到实时进度
+                    log(f"[{stage_name}] {line}")
+                    line_count += 1
+                    last_activity = time.time()
+
+        # 等待进程结束
+        return_code = proc.wait()
+
+        elapsed = time.time() - start_time
+        log(f"{stage_name} 执行完成，耗时 {elapsed:.1f} 秒，共 {line_count} 行输出，退出码: {return_code}")
+
+        if return_code != 0:
+            return False
+        return True
+
     except subprocess.TimeoutExpired:
-        log(f"错误: {stage_name} 执行超时")
+        proc.kill()
+        log(f"错误: {stage_name} 执行超时 ({timeout}秒)，已强制终止")
         return False
-
-    if result.returncode != 0:
-        log(f"错误: {stage_name} 退出码: {result.returncode}")
-        return False
-
-    log(f"{stage_name} 执行完成")
-    return True
 
 
 def wait_for_file(file_path, timeout=300):
     log(f"等待文件生成: {file_path}")
     start_time = time.time()
+    last_size = -1
+    stable_seconds = 0
     while time.time() - start_time < timeout:
-        if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
-            log(f"文件已生成: {file_path}")
-            return True
+        if os.path.exists(file_path):
+            current_size = os.path.getsize(file_path)
+            if current_size > 0:
+                if current_size == last_size:
+                    stable_seconds += 1
+                    if stable_seconds >= 3:  # 稳定 3 秒才认为完成
+                        log(f"文件已稳定生成: {file_path} ({current_size} 字节)")
+                        return True
+                else:
+                    stable_seconds = 0
+                    log(f"文件大小变化中: {last_size} -> {current_size} 字节")
+                last_size = current_size
         time.sleep(1)
-    log(f"错误: 文件未生成: {file_path}")
+    log(f"错误: 文件超时未生成: {file_path}")
     return False
 
 

@@ -33,6 +33,14 @@ pip install pandas openpyxl psutil
 
 Run these from the repository root.
 
+### Install Python dependencies
+
+```bash
+pip install pandas openpyxl psutil
+```
+
+There is no dedicated test or lint setup in this repository; validating changes usually means running the relevant script against local input files and checking the generated TXT/XLSX artifacts.
+
 ### Full pipeline
 
 ```bat
@@ -41,7 +49,7 @@ python ppp.py
 python 1.py
 ```
 
-This is the same effective flow wrapped by `轮子top100.bat` and `轮子top1000.bat`, with the caveat that both batch files currently invoke the same Python entrypoints and do not themselves change the port set.
+This is the actual end-to-end flow: discover ports/URLs with `ts`, turn `port.txt` into an Excel report, then run Spray and Ehole over the discovered URLs.
 
 ### Batch entrypoints
 
@@ -55,6 +63,15 @@ top1000仅端口.bat
 小字典.bat
 ```
 
+Important quirks from the current batch files:
+
+- `轮子top100.bat` and `轮子top1000.bat` currently run the same Python flow and do not themselves switch the port list.
+- `top100仅端口.bat` runs `python 2.py` then `python ppp.py`.
+- `top1000仅端口.bat` currently points at `python 2.txt`, so treat it as stale/broken until corrected.
+- `仅域名.bat` just runs `python 1.py`, so it requires a pre-existing `url.txt`.
+- `端口处理.bat` only regenerates the Excel report from `port.txt`.
+- `小字典.bat` runs `python 1.py` with the current dictionary files in the repo.
+
 ### Port scanning only
 
 ```bat
@@ -62,15 +79,15 @@ python 2.py
 python ppp.py
 ```
 
-`2.py` runs `ts -hf ip.txt -portf ports.txt -np -m port,url` and normalizes `url.txt` / `port.txt`. `ppp.py` parses `port.txt` into an Excel report.
+`2.py` runs `ts -hf ip.txt -portf ports.txt -np -m port,url`, then normalizes `url.txt` / `port.txt` by checking both the repo root and `CfgOutPath` from `config.yaml`. If `url.txt` is missing, it reconstructs URLs from `port.txt`.
 
-### Full URL / directory / fingerprint processing from existing inputs
+### URL / directory / fingerprint processing from existing inputs
 
 ```bat
 python 1.py
 ```
 
-`1.py` assumes `url.txt` already exists, launches `spray.exe`, processes `res.json` via `process_data.py`, filters status-200 URLs, then runs `ehole finger` on the filtered URL list.
+`1.py` assumes `url.txt` already exists, runs `spray.exe`, waits for `res.json`, converts Spray output through `process_data.py`, extracts status-200 URLs, stores dated artifacts under `MMDD/`, then runs `ehole finger` and beautifies the resulting workbook.
 
 ### Re-process or beautify outputs
 
@@ -95,8 +112,7 @@ spray.exe -l url.txt -d dirv2.txt -f res.json
 ehole finger -l url.txt -o result.xlsx -t 10
 ```
 
-These are documented in `命令.txt` and `AGENTS.md`; use them when debugging outside the Python wrappers.
-
+These commands are also listed in `命令.txt` and `AGENTS.md`; use them when debugging the external binaries outside the Python wrappers.
 ## Key inputs and outputs
 
 Inputs expected in the repo root:
@@ -152,7 +168,7 @@ It writes a unified workbook with conditional formatting, per-source coloring, a
 
 Sequence:
 
-1. Create a `MMDD` output directory
+1. Create a `MMDD` output directory and a dated run log
 2. Delete transient files like `url.txt.stat` and previous processed text output
 3. Run `spray.exe -l url.txt -d dirv2.txt -f res.json`
 4. Wait for the process and the `res.json` artifact
@@ -160,19 +176,23 @@ Sequence:
 6. Filter status-200 URLs into a dated TXT file
 7. Move Spray raw/processed artifacts into the date folder
 8. Run `ehole finger` against the filtered URL list
-9. Re-run `process_data.py` on the resulting `ehole` workbook to beautify it
+9. Search for the generated Ehole workbook in both the repo and `CfgOutPath`, move it into the expected dated path if needed
+10. Re-run `process_data.py` on the resulting `ehole` workbook to beautify it
 
-Notable implementation detail: `monitor_process()` has a special fast-finish path for `ehole.exe`, because the process may exit before polling catches it.
+Notable implementation details:
+
+- The script now uses `subprocess.run` / `subprocess.Popen` rather than `start cmd /c`, so command execution and logging stay in-process.
+- It validates that the Ehole input file contains non-empty HTTP(S) URLs before launching Ehole.
+- It creates unique names for intermediate and final artifacts to avoid clobbering previous runs on the same day.
 
 ### 4. Result post-processing stage: `process_data.py`
 
 `process_data.py` has two modes selected by input extension:
 
-- `.json`: parse Spray line-delimited JSON into a DataFrame, drop `redirect_url`, normalize column order, extract status-200 URLs, write Excel plus TXT, and apply Excel formatting
+- `.json`: parse Spray line-delimited JSON into a DataFrame, drop `redirect_url`, normalize column order, prefer fixed column positions for URL/status extraction, then fall back to semantic column-name matching if Spray's output shape shifts
 - `.xlsx` / `.xls`: treat the file as an `ehole` result workbook and beautify it in place
 
 This file is the main formatting and artifact-normalization layer in the repo.
-
 ## File and control-flow relationships
 
 The effective data flow across scripts is:
@@ -193,8 +213,8 @@ status-200 URL TXT -> `ehole finger` -> `ehole_result_*.xlsx`
 
 ## Maintenance notes for future edits
 
-- Keep Windows process-launch behavior in mind: `1.py` uses `os.system("start cmd /c ...")`, not `subprocess.run`, to preserve native console behavior for external executables.
 - Do not assume `url.txt` is always produced directly by `ts`; `2.py` intentionally reconstructs it from `port.txt` when necessary.
-- `1.py` and `process_data.py` both assume Spray output semantics where URL data is effectively in column `E` and status code in column `J`; changes to upstream JSON shape can break filtering.
-- `config.yaml` is not just documentation; `2.py` reads it at runtime, so changes to `CfgOutPath` can affect artifact discovery.
-- Date-folder organization is part of the workflow, not just a convenience; preserve it unless intentionally changing output layout.
+- `1.py` and `process_data.py` prefer fixed Spray columns (`E` for URL, `J` for status) but also contain semantic fallback matching; if upstream Spray output changes, update both places together.
+- `config.yaml` is not just documentation; `1.py` and `2.py` both read `CfgOutPath` at runtime, so changes to that path affect where artifacts are discovered and moved from.
+- Date-folder organization and unique output naming are part of the workflow, not just conveniences; preserve them unless intentionally changing output layout.
+- The generated Excel files are a first-class output of the repo. When changing parsing or column mapping logic, verify both the TXT handoff files and workbook formatting, not just console output.
