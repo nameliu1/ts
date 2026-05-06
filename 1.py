@@ -206,6 +206,18 @@ def validate_scan_inputs():
     return True
 
 
+def archive_empty_spray_result(output_dir):
+    if not os.path.exists(JSON_FILE):
+        with open(JSON_FILE, "w", encoding="utf-8") as f:
+            pass
+    spray_json_base = f"spray_original_{datetime.datetime.now().strftime('%Y%m%d')}_empty"
+    spray_json_dest = generate_unique_filename(output_dir, spray_json_base, ".json")
+    shutil.move(JSON_FILE, spray_json_dest)
+    log(f"spray未发现有效结果，已归档空结果文件: {spray_json_dest}")
+    log("流程结束：未发现状态码200的目录扫描结果，跳过process_data和ehole。")
+    return 0
+
+
 def get_config_output_path():
     try:
         config_path = os.path.join(BASE_DIR, "config.yaml")
@@ -585,8 +597,10 @@ def run_pipeline():
         log("错误: spray执行失败")
         return 1
     if not wait_for_file(JSON_FILE, timeout=10):
-        log("错误: spray退出成功但未生成有效res.json")
         log_input_diagnostics("spray", spray_executable)
+        if os.path.exists(JSON_FILE) and os.path.getsize(JSON_FILE) == 0:
+            return archive_empty_spray_result(full_date_dir)
+        log("错误: spray退出成功但未生成res.json")
         log("提示: 当前url.txt行数很少时，可能是输入资产文件未正确覆盖；请确认你运行前保存的是目标url.txt")
         return 1
 
