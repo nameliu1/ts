@@ -216,20 +216,17 @@ def validate_scan_inputs():
 
 
 def archive_empty_spray_result(output_dir):
-    if not os.path.exists(JSON_FILE):
-        with open(JSON_FILE, "w", encoding="utf-8") as f:
-            pass
+    if os.path.exists(JSON_FILE):
+        os.remove(JSON_FILE)
     date_str = datetime.datetime.now().strftime("%Y%m%d")
-    spray_json_dest = generate_unique_filename(output_dir, f"spray_original_{date_str}_empty", ".json")
     summary_dest = generate_unique_filename(output_dir, f"spray_no_findings_{date_str}", ".txt")
-    shutil.move(JSON_FILE, spray_json_dest)
     with open(summary_dest, "w", encoding="utf-8") as f:
         f.write("spray completed successfully but produced no JSON records.\n")
         f.write(f"url_count={count_nonempty_lines(URL_FILE)}\n")
         f.write(f"dict_count={count_nonempty_lines(DIR_FILE)}\n")
-    log(f"spray未发现有效结果，已归档空结果文件: {spray_json_dest}")
+    log("spray未发现有效结果，已删除空res.json")
     log(f"无发现说明文件: {summary_dest}")
-    return spray_json_dest
+    return None
 
 
 def create_no_findings_excel(output_dir, reason, source_json_path=None):
@@ -711,7 +708,7 @@ def run_spray_scan(spray_executable, input_file, dict_file, output_file, stage_n
 
 def maybe_run_secondary_scan(spray_executable, primary_json_path, output_dir):
     input_urls = read_valid_urls(URL_FILE)
-    matched_bases = extract_base_urls_from_json(primary_json_path)
+    matched_bases = extract_base_urls_from_json(primary_json_path) if primary_json_path else set()
     unmatched_urls = [url for url in input_urls if normalize_base_url(url) not in matched_bases]
     log(f"dirv2扫描命中资产 {len(matched_bases)} 个，未命中资产 {len(unmatched_urls)} 个")
     if not unmatched_urls:
@@ -731,9 +728,8 @@ def maybe_run_secondary_scan(spray_executable, primary_json_path, output_dir):
     log(f"开始dirv3二次扫描，字典 {count_nonempty_lines(SECONDARY_DIR_FILE)} 条")
     if not run_spray_scan(spray_executable, secondary_input, SECONDARY_DIR_FILE, secondary_json, "spray-dirv3"):
         if os.path.exists(secondary_json) and os.path.getsize(secondary_json) == 0:
-            secondary_empty = generate_unique_filename(output_dir, f"spray_dirv3_original_{date_str}_empty", ".json")
-            shutil.move(secondary_json, secondary_empty)
-            log(f"dirv3二次扫描无发现，已归档空结果: {secondary_empty}")
+            os.remove(secondary_json)
+            log("dirv3二次扫描无发现，已删除空res_dirv3.json")
         else:
             log("dirv3二次扫描未生成有效结果")
         return None
