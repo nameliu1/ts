@@ -232,6 +232,46 @@ def archive_empty_spray_result(output_dir):
     return spray_json_dest
 
 
+def create_no_findings_excel(output_dir, reason, source_json_path=None):
+    date_str = datetime.datetime.now().strftime("%Y%m%d")
+    excel_path = generate_unique_filename(output_dir, f"spray_processed_{date_str}_no_findings", ".xlsx")
+    summary = {
+        "结果": "未发现有效目录扫描结果",
+        "原因": reason,
+        "url.txt非空行数": count_nonempty_lines(URL_FILE),
+        "dirv2.txt非空行数": count_nonempty_lines(DIR_FILE),
+        "dirv3.txt非空行数": count_nonempty_lines(SECONDARY_DIR_FILE),
+        "原始JSON": source_json_path or "",
+        "生成时间": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    pd.DataFrame([summary]).to_excel(excel_path, index=False)
+    try:
+        import process_data as process_data_module
+        process_data_module.beautify_spray_excel(excel_path)
+    except Exception as e:
+        log(f"警告: 无发现Excel美化失败: {e}")
+    log(f"无发现Excel已生成: {excel_path}")
+    return excel_path
+
+
+def archive_spray_outputs(json_file, excel_file, output_dir, json_prefix="spray_original", excel_prefix="spray_processed"):
+    date_str = datetime.datetime.now().strftime("%Y%m%d")
+    spray_json_dest = None
+    spray_excel_dest = None
+
+    if json_file and os.path.exists(json_file):
+        spray_json_dest = generate_unique_filename(output_dir, f"{json_prefix}_{date_str}", ".json")
+        shutil.move(json_file, spray_json_dest)
+        log(f"已移动Spray原始结果: {spray_json_dest}")
+
+    if excel_file and os.path.exists(excel_file):
+        spray_excel_dest = generate_unique_filename(output_dir, f"{excel_prefix}_{date_str}", ".xlsx")
+        shutil.move(excel_file, spray_excel_dest)
+        log(f"已移动Spray处理后Excel: {spray_excel_dest}")
+
+    return spray_json_dest, spray_excel_dest
+
+
 def get_config_output_path():
     try:
         config_path = os.path.join(BASE_DIR, "config.yaml")
@@ -789,6 +829,7 @@ def run_pipeline():
             empty_json_dest = archive_empty_spray_result(full_date_dir)
             secondary_json_dest = maybe_run_secondary_scan(spray_executable, empty_json_dest, full_date_dir)
             if not secondary_json_dest:
+                create_no_findings_excel(full_date_dir, "dirv2和dirv3均未产生可处理结果", empty_json_dest)
                 log("流程结束：dirv2和dirv3均未产生可处理结果。")
                 return 0
             secondary_excel = generate_unique_filename(full_date_dir, f"spray_dirv3_processed_{datetime.datetime.now().strftime('%Y%m%d')}", ".xlsx")
@@ -798,6 +839,7 @@ def run_pipeline():
                 return 1
             filtered_txt_path = filter_status_200(secondary_excel, full_date_dir, 1)
             if not filtered_txt_path:
+                create_no_findings_excel(full_date_dir, "dirv3二次扫描未产生状态码200 URL", secondary_json_dest)
                 log("流程结束：dirv3二次扫描未产生状态码200 URL。")
                 return 0
             return run_ehole_stage(filtered_txt_path, full_date_dir)
@@ -814,19 +856,13 @@ def run_pipeline():
 
     log("步骤3: 筛选状态码200的URL...")
     filtered_txt_path = filter_status_200(unique_excel_file, full_date_dir, 1)
-    if not filtered_txt_path:
-        log("错误: 未生成状态码为200的URL文件")
-        return 1
 
     log("步骤3.5: 移动Spray结果文件到日期文件夹...")
-    spray_json_base = f"spray_original_{datetime.datetime.now().strftime('%Y%m%d')}"
-    spray_json_dest = generate_unique_filename(full_date_dir, spray_json_base, ".json")
-    spray_excel_base = f"spray_processed_{datetime.datetime.now().strftime('%Y%m%d')}"
-    spray_excel_dest = generate_unique_filename(full_date_dir, spray_excel_base, ".xlsx")
-    shutil.move(JSON_FILE, spray_json_dest)
-    log(f"已移动Spray原始结果: {spray_json_dest}")
-    shutil.move(unique_excel_file, spray_excel_dest)
-    log(f"已移动Spray处理后Excel: {spray_excel_dest}")
+    spray_json_dest, spray_excel_dest = archive_spray_outputs(JSON_FILE, unique_excel_file, full_date_dir)
+
+    if not filtered_txt_path:
+        log(f"流程结束：未生成状态码为200的URL文件，Spray Excel已保存: {spray_excel_dest}")
+        return 0
 
     secondary_filtered = None
     secondary_json_dest = maybe_run_secondary_scan(spray_executable, spray_json_dest, full_date_dir)
